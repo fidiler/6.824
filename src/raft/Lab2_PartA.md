@@ -35,4 +35,4 @@ Lab2 要求实现上述的接口，最终的测试用例会调用上面的接口
 
 首先我们先来看进行一次leader选举的过程，如图：
 
-[leader选举流程](doc/leader选举流程.png)
+![leader选举流程](doc/leader选举流程.png)

@@ -3,11 +3,11 @@ package raft
 import (
 	"log"
 	"math/rand"
+	"time"
 )
-import "time"
 
 // Debugging
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -16,11 +16,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-func generateElectionTimeoutTime() time.Duration {
-	n := time.Duration(rand.Intn(300-150)+150) * time.Millisecond
+func getElectionTimeoutTime() int64 {
+	rand.Seed(time.Now().UnixNano())
+	n := int64(time.Duration(rand.Intn(300-150)+150) * time.Millisecond)
 	return n
-}
-
-func generateHeartbeatTime() int64 {
-	return int64(100 * time.Millisecond)
 }
