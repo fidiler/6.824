@@ -91,14 +91,17 @@ type Raft struct {
 	logs        []Log
 	votedFor    int32
 	currentTerm uint32
-	commitIndex int32
-	lastApplied int32
+	commitIndex int64
+	lastApplied int64
 
 	nextIndex  []int
 	matchIndex []int
 
 	state state
 
+	applyCh chan ApplyMsg
+
+	commitCh         chan bool
 	startElectionCh  chan bool
 	startHeartbeatCh chan bool
 
@@ -143,11 +146,19 @@ func (rf *Raft) setLeaderID(leaderID int) {
 }
 
 func (rf *Raft) getCommitIndex() int {
-	return int(atomic.LoadInt32(&rf.commitIndex))
+	return int(atomic.LoadInt64(&rf.commitIndex))
 }
 
 func (rf *Raft) setCommitIndex(commitIndex int) {
-	atomic.StoreInt32(&rf.commitIndex, int32(commitIndex))
+	atomic.StoreInt64(&rf.commitIndex, int64(commitIndex))
+}
+
+func (rf *Raft) getLastApplied() int {
+	return int(atomic.LoadInt64(&rf.lastApplied))
+}
+
+func (rf *Raft) incrementLastApplied() {
+	atomic.AddInt64(&rf.lastApplied, 1)
 }
 
 func (rf *Raft) stateConvert(state int) {
@@ -351,6 +362,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	if term, isLeader = rf.GetState(); isLeader {
+		rf.mu.Lock()
+		rf.logs = append(rf.logs, Log{
+			Term:    term,
+			Command: command,
+		})
+
+		index = len(rf.logs) - 1
+		rf.mu.Unlock()
+
+		replicated := 1
+
+		go rf.concurrentSendAppendEntries(term, index, rf.getCommitIndex(), &replicated)
+
+	}
 
 	return index, term, isLeader
 }
@@ -402,6 +428,115 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
+}
+
+func (rf *Raft) concurrentSendAppendEntries(term, index, commitIndex int, pReplicated *int) {
+	majority := len(rf.peers)
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+
+		go func(peer int, term int) {
+		Retry:
+			if _, isLeader := rf.GetState(); !isLeader {
+				return
+			}
+
+			// 复制日志时的term必须和当前leader的term是同一任期
+			if term != rf.getCurrentTerm() {
+				return
+			}
+
+			entries := make([]Log, 0)
+
+			rf.mu.Lock()
+			nextIndex := rf.nextIndex[peer]
+			prevLogIndex := nextIndex - 1
+			prevLogTerm := rf.logs[prevLogIndex].Term
+			// 从nextIndex处开始复制日志
+			if index+1 > nextIndex {
+				entries = rf.logs[nextIndex : index+1]
+			}
+
+			rf.mu.Unlock()
+
+			args := &AppendEntriesArgs{
+				Term:         term,
+				LeaderID:     rf.getLeaderID(),
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      entries,
+				LeaderCommit: commitIndex,
+			}
+
+			reply := &AppendEntriesReply{}
+
+			ok := rf.sendAppendEntries(peer, args, reply)
+			if !ok {
+				goto Retry
+			}
+
+			if reply.Success {
+
+				// 更新对应的nextIndex和matchIndex
+				if index+1 >= nextIndex {
+					rf.mu.Lock()
+					rf.matchIndex[peer] = index
+					rf.nextIndex[peer] = index + 1
+					rf.mu.Unlock()
+				}
+
+				rf.mu.Lock()
+				*pReplicated++
+
+				// 计算大多数的matchIndex[i] >= N
+				matchIndexAgree := 1
+				for i := range rf.peers {
+					if i == rf.me {
+						continue
+					}
+
+					if rf.matchIndex[i] >= index {
+						matchIndexAgree++
+					}
+				}
+
+				// 判断是否可以set commitIndex = N
+				if index > commitIndex && *pReplicated > majority &&
+					matchIndexAgree > majority && rf.logs[index].Term == rf.getCurrentTerm() {
+					rf.mu.Unlock()
+
+					rf.setCommitIndex(index)
+
+					// 通知已经提交日志，应用日志到状态机
+					rf.commitCh <- true
+
+					// 发送一次心跳信息，通知其他服务器节点更新commitIndex
+					rf.startHeartbeat()
+
+				} else {
+					rf.mu.Unlock()
+				}
+
+			} else {
+				if args.Term < reply.Term {
+					rf.setCurrentTerm(reply.Term)
+					rf.stateConvert(follower)
+					rf.setVotedFor(-1)
+					rf.setLeaderID(-1)
+				}
+
+				if nextIndex-1 > 0 {
+					rf.mu.Lock()
+					rf.nextIndex[peer]--
+					rf.mu.Unlock()
+					goto Retry
+				}
+			}
+
+		}(peer, term)
+	}
 }
 
 //
@@ -486,50 +621,13 @@ func (rf *Raft) startHeartbeat() {
 	// leader每次发送心跳信息时记录一下最新的发送时间戳
 	rf.updateSendHeartbeatTime()
 
-	go func(term int) {
-		for peer := range rf.peers {
-			if peer == rf.me {
-				continue
-			}
+	rf.mu.Lock()
+	index := len(rf.logs) - 1
+	rf.mu.Unlock()
 
-			go func(peer int, term int) {
-				if _, isLeader := rf.GetState(); !isLeader {
-					return
-				}
+	replicated := 1
 
-				rf.mu.Lock()
-				nextIndex := rf.nextIndex[peer]
-				prevLogIndex := nextIndex - 1
-				prevLogTerm := rf.logs[prevLogIndex].Term
-				entries := make([]Log, 0)
-				rf.mu.Unlock()
-
-				args := &AppendEntriesArgs{
-					Term:         rf.getCurrentTerm(),
-					LeaderID:     rf.getLeaderID(),
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
-					Entries:      entries,
-				}
-
-				reply := &AppendEntriesReply{}
-
-				if rf.sendAppendEntries(peer, args, reply) {
-					if reply.Success {
-					} else {
-						if args.Term < reply.Term {
-							rf.setCurrentTerm(reply.Term)
-							rf.stateConvert(follower)
-							rf.setVotedFor(-1)
-							rf.setLeaderID(-1)
-						}
-
-					}
-				}
-
-			}(peer, term)
-		}
-	}(term)
+	go rf.concurrentSendAppendEntries(term, index, rf.getCommitIndex(), &replicated)
 
 }
 
@@ -634,6 +732,28 @@ func (rf *Raft) eventLoop() {
 			rf.startElection()
 		case <-rf.startHeartbeatCh:
 			rf.startHeartbeat()
+		case <-rf.commitCh:
+			if rf.getCommitIndex() > rf.getLastApplied() {
+				for {
+					if rf.getCommitIndex() <= rf.getLastApplied() {
+						break
+					}
+
+					// 递增lasstApplied
+					rf.incrementLastApplied()
+
+					// 应用到状态机
+					index := rf.getLastApplied()
+					rf.mu.Lock()
+					command := rf.logs[index].Command
+					rf.mu.Unlock()
+
+					rf.applyCh <- ApplyMsg{
+						Index:   index,
+						Command: command,
+					}
+				}
+			}
 		}
 	}
 }
@@ -660,10 +780,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = make([]Log, 0)
 	rf.logs = append(rf.logs, Log{Term: 0})
 
+	rf.applyCh = applyCh
+
 	atomic.StoreInt32(&rf.votedFor, -1)
 	atomic.StoreUint32(&rf.currentTerm, 0)
-	atomic.StoreInt32(&rf.commitIndex, 0)
-	atomic.StoreInt32(&rf.lastApplied, 0)
+	atomic.StoreInt64(&rf.commitIndex, 0)
+	atomic.StoreInt64(&rf.lastApplied, 0)
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -671,6 +793,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = state{v: &atomic.Value{}}
 	rf.state.store(follower)
 
+	rf.commitCh = make(chan bool)
 	rf.startElectionCh = make(chan bool)
 	rf.startHeartbeatCh = make(chan bool)
 
