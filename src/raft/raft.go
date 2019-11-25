@@ -740,9 +740,7 @@ func (rf *Raft) startElection() {
 
 			reply := &RequestVoteReply{}
 
-			// 并行发起投票请求
 			go func(peer int, args *RequestVoteArgs, reply *RequestVoteReply) {
-				// 发送失败，直接退出
 				ok := rf.sendRequestVote(peer, args, reply)
 				if !ok {
 					return
