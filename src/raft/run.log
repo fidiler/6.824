@@ -1,12 +1,12 @@
-Test (2B): basic agreement ...
-2019/11/20 06:57:46 [rf.startElection] Candidate-4 start election (rf.logs = [{0 <nil>}])
-2019/11/20 06:57:46 leader-4 convert leader (logs = [{0 <nil>}])
+Test (2C): more persistence ...
+2019/11/28 05:51:35 [rf.stateConvert] Server-2 on conversion to candidate, start election
+2019/11/28 05:51:35 [rf.stateConvert] candidate-2 convert leader, leader logs = [{0 <nil>}]
 panic: runtime error: index out of range
 
-goroutine 82 [running]:
-raft.(*Raft).concurrentSendAppendEntries.func1(0xc0000e63c0, 0x0, 0x0, 0xc000014808, 0xc000014810, 0x2, 0x3, 0x1)
-	/root/workspace/code/github.com/fidiler/6.824/src/raft/raft.go:496 +0x785
+goroutine 86 [running]:
+raft.(*Raft).concurrentSendAppendEntries.func1(0xc0000e41e0, 0x0, 0x0, 0xc00006c750, 0xc00006c758, 0x2, 0x4, 0x1)
+	/root/workspace/code/github.com/fidiler/6.824/src/raft/raft.go:588 +0xb22
 created by raft.(*Raft).concurrentSendAppendEntries
-	/root/workspace/code/github.com/fidiler/6.824/src/raft/raft.go:480 +0xe5
+	/root/workspace/code/github.com/fidiler/6.824/src/raft/raft.go:564 +0xe5
 exit status 2
-FAIL	raft	0.200s
+FAIL	raft	0.167s
