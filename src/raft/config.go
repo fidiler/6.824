@@ -49,6 +49,8 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 		}
 	})
 	runtime.GOMAXPROCS(4)
+
+	// 创建server
 	cfg := &config{}
 	cfg.t = t
 	cfg.net = labrpc.MakeNetwork()
@@ -60,8 +62,10 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	cfg.endnames = make([][]string, cfg.n)
 	cfg.logs = make([]map[int]int, cfg.n)
 
+	// 设置协议可靠性（TCP）
 	cfg.setunreliable(unreliable)
 
+	// 设置长时间的延迟
 	cfg.net.LongDelays(true)
 
 	// create a full set of Rafts.
@@ -117,6 +121,7 @@ func (cfg *config) crash1(i int) {
 // this server. since we cannot really kill it.
 //
 func (cfg *config) start1(i int) {
+	// 如果有运行的server-i，会kill
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.

@@ -562,7 +562,6 @@ func TestPersist22C(t *testing.T) {
 		index++
 
 		leader1 := cfg.checkOneLeader()
-
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 

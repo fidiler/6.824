@@ -1,0 +1,4 @@
+Test (2C): more persistence ...
+2019/12/05 19:18:23 apply error: commit index=7 server=2 17 != server=4 16
+exit status 1
+FAIL	raft	9.204s
