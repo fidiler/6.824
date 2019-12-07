@@ -499,8 +499,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
+	IsConflict    bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -568,17 +571,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.stateConvert(follower)
 
 			rf.resetElectionTimeoutTime()
+
 			reply.Success = true
 			reply.Term = rf.currentTerm
+
+			rf.mu.Unlock()
+
 		} else {
 			// DPrintf("[rf.AppendEntries] Server-%d (logs = %v, term = %d) refused Leader-%d (args.Entries = %v, term = %d) AppendEntires, because log not match,\n",
 			// rf.me, rf.logs, rf.getCurrentTerm(), args.LeaderID, args.Entries, args.Term)
 
-			// TODO nextIndex快速回溯优化
-			reply.Success = false
-			reply.Term = rf.currentTerm
+			// nextIndex快速回溯优化
+			if len(rf.logs) <= args.PrevLogIndex {
+				reply.ConflictIndex = len(rf.logs)
+				reply.ConflictTerm = -1
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				rf.mu.Unlock()
+
+			} else if len(rf.logs) > args.PrevLogIndex && rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+				reply.ConflictTerm = rf.logs[args.PrevLogIndex].Term
+				for i, log := range rf.logs {
+					if log.Term == reply.ConflictTerm {
+						reply.ConflictIndex = i
+						break
+					}
+				}
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				rf.mu.Unlock()
+
+			} else {
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				reply.ConflictIndex = 0
+				reply.ConflictTerm = -1
+				rf.mu.Unlock()
+			}
 		}
-		rf.mu.Unlock()
+
 	} else {
 		// DPrintf("[rf.AppendEntries] Server-%d (term = %d) refused Leader-%d (term = %d) AppendEntires, because term not match,\n",
 		// rf.me, rf.getCurrentTerm(), args.LeaderID, args.Term)
@@ -720,7 +751,39 @@ func (rf *Raft) parallelSendAppendEntries(term, lastLogIndex int, pReplicated *i
 					// If AppendEntries fails because of log inconsistency:
 					// decrement nextIndex and retry (§5.3）
 					rf.mu.Lock()
-					rf.nextIndex[peer]--
+
+					// follower没有包含args.PrevLogIndex
+					if reply.ConflictIndex != 0 && reply.ConflictTerm == -1 {
+						rf.nextIndex[peer] = reply.ConflictIndex
+
+					} else if reply.ConflictIndex != 0 && reply.ConflictTerm != -1 {
+						// 冲突的日志任期在leafer日志中找到该任期第一个位置的索引
+						firstConflictTermOfIndex := -1
+						for i, log := range rf.logs {
+							if log.Term == reply.ConflictTerm {
+								firstConflictTermOfIndex = i
+								break
+							}
+						}
+
+						// 没有在leader日志中找到冲突日志的第一个任期的索引
+						if firstConflictTermOfIndex == -1 {
+							rf.nextIndex[peer] = reply.ConflictIndex
+						} else {
+							lastConflictTermOfIndex := firstConflictTermOfIndex + 1
+							// 从这个位置开始，找到leader日志条目位于该任期期间的最后一个条目索引
+							for i := firstConflictTermOfIndex; i < len(rf.logs); i++ {
+								if rf.logs[i].Term != reply.ConflictTerm {
+									lastConflictTermOfIndex = i + 1
+									break
+								}
+							}
+							rf.nextIndex[peer] = lastConflictTermOfIndex
+						}
+
+					} else {
+						rf.nextIndex[peer]--
+					}
 					rf.mu.Unlock()
 					goto Retry
 				}
